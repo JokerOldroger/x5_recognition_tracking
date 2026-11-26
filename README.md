@@ -72,3 +72,35 @@ prepare_config.py 如果提示配置校验失败，先修正所报告的参数�
 若摄像头停止供图，上位机会取消动作并发送零速。识别进程存在但摄像头子进程退出时，服务可能仍显示运行，须结合 No fresh vision 和相机错误判断。服务不会自动重启整个识别程序，避免意外重新申请控制。无网络且系统时间始终不正确时，会持续等待，需要先解决系统时间。
 
 本包仅包含 X5 上位机代码、配置示例、说明和测试，不包含 STM32 源码、烧录固件或 /opt/tros 中的模型和算法安装包。当前配套 H60 固件已烧录时无需再次烧录。
+
+## 绿色网球追踪测试
+
+测试入口用 OpenCV 对相机或视频画面做 HSV 分割，按面积、圆度和长宽比筛出黄绿色球框。轮廓圆度与长宽比的乘积作为候选分数，交给 [RDK Model Zoo 的官方 ByteTrack](https://github.com/D-Robotics/rdk_model_zoo/blob/main/samples/vision/bytetrack/runtime/python/README.md) 关联相邻帧。每帧都推进跟踪器，暂时丢球时可以保留待恢复的轨迹。整个测试在 CPU 上运行，无需下载 BPU 模型。入口只处理视频、预览和记录。
+
+在 RDK X5 的 Ubuntu 22.04 上，从项目根目录准备依赖和官方源码：
+
+```bash
+sudo apt install git build-essential python3-dev python3-venv python3-opencv python3-scipy
+python3 -m venv --system-site-packages ~/venvs/dingdong-tennis
+source ~/venvs/dingdong-tennis/bin/activate
+python -m pip install 'numpy>=1.22,<1.24' wheel Cython 'lap==0.5.12'
+python -m pip install --no-build-isolation 'cython-bbox==0.1.5'
+git clone --depth 1 --filter=blob:none --sparse https://github.com/D-Robotics/rdk_model_zoo.git "$HOME/rdk_model_zoo"
+git -C "$HOME/rdk_model_zoo" sparse-checkout set samples/vision/bytetrack/runtime/python
+```
+
+先用包含滚动网球的视频回放。SSH 下可直接生成带框的 MP4 和逐帧 JSONL：
+
+```bash
+python -m dingdong.tennis_tracking --model-zoo "$HOME/rdk_model_zoo" \
+  --input tennis.mp4 --output tracked.mp4 --records tracks.jsonl
+```
+
+实机测试时，把摄像头路径换成你的 USB 摄像头。如果叮咚服务正在使用同一个设备，先停掉服务以释放摄像头，测试结束后再启动原服务。有桌面环境时可以加 `--preview`，按 Q 或 Esc 退出。
+
+```bash
+python -m dingdong.tennis_tracking --model-zoo "$HOME/rdk_model_zoo" \
+  --camera /dev/video0 --max-frames 300 --output live.mp4 --records live.jsonl
+```
+
+JSONL 每行包含帧号、候选框数量及已确认的轨迹。每条轨迹包含 `track_id`、原图像素框 `bbox_xyxy`、球心 `center_xy` 和形状分数。测试时先确认球移动期间 ID 稳定、球离开后轨迹列表为空。候选数量长期为零时，按实拍光照调整 `--hsv-low H S V`、`--hsv-high H S V` 或降低 `--min-area`。球过远、运动模糊、相邻帧球框重叠太低或场景里有同色圆物时，可能丢轨、换 ID 或误检。
