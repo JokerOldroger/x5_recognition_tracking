@@ -1,0 +1,9 @@
+{
+  "version": "x5-20261025-final",
+  "date": "2026-10-25",
+  "platform": "RDK X5 / Ubuntu 22.04 / TROS Humble",
+  "compatible_mcu": "dingdong_exit_diagnostics.hex",
+  "tests_passed": 46,
+  "config_policy": "Archive has config.example.json only; prepare_config.py preserves existing calibration and enables manual boot with START requests.",
+  "known_issue": "Intermittent official USB camera Invalid v4l2 format crash previously observed; not reproduced in latest tests, not confirmed resolved."
+}
