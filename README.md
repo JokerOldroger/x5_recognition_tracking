@@ -103,4 +103,6 @@ python -m dingdong.tennis_tracking --model-zoo "$HOME/rdk_model_zoo" \
   --camera /dev/video0 --max-frames 300 --output live.mp4 --records live.jsonl
 ```
 
-JSONL 每行包含帧号、候选框数量及已确认的轨迹。每条轨迹包含 `track_id`、原图像素框 `bbox_xyxy`、球心 `center_xy` 和形状分数。测试时先确认球移动期间 ID 稳定、球离开后轨迹列表为空。候选数量长期为零时，按实拍光照调整 `--hsv-low H S V`、`--hsv-high H S V` 或降低 `--min-area`。球过远、运动模糊、相邻帧球框重叠太低或场景里有同色圆物时，可能丢轨、换 ID 或误检。
+JSONL 保留 `frame`、`candidates` 和 `tracks`。每条轨迹包含 `track_id`、原图像素框 `bbox_xyxy`、球心 `center_xy` 和形状分数。新增的 `frame_size_px` 按宽、高存储，`candidate_boxes` 按 `[x1, y1, x2, y2, score]` 记录送入 ByteTrack 前的候选。候选为零时可检查 HSV 阈值和最小面积。有候选但没有轨迹时，可结合前后帧检查轨迹确认和关联。球过远、运动模糊、相邻帧球框重叠太低或场景里有同色圆物时，可能丢轨、换 ID 或误检。
+
+`timing_ms` 分别记录读取画面、检测和跟踪更新的本机耗时，可用同一段录像比较优化前后的各阶段。`read` 包含等待摄像头或解码视频的时间。检测复用该视频流的 HSV 和掩膜缓冲区。同一条流使用固定分辨率，分辨率在中途变化时，程序报告出错帧并结束本次处理。

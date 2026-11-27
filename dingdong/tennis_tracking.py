@@ -6,18 +6,23 @@ import json
 import math
 from pathlib import Path
 import sys
+from time import perf_counter_ns
 
 import cv2
 import numpy as np
 
 
-def detect_tennis_balls(frame, lower_hsv, upper_hsv, min_area, min_circularity):
+MORPH_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+
+def detect_tennis_balls(
+    frame, lower_hsv, upper_hsv, min_area, min_circularity, *, hsv_buffer=None, mask_buffer=None
+):
     """Return an N×5 array of original-image XYXY boxes and shape scores."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV, dst=hsv_buffer)
+    mask = cv2.inRange(hsv, lower_hsv, upper_hsv, dst=mask_buffer)
+    cv2.morphologyEx(mask, cv2.MORPH_OPEN, MORPH_KERNEL, dst=mask)
+    cv2.morphologyEx(mask, cv2.MORPH_CLOSE, MORPH_KERNEL, dst=mask)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     max_area = frame.shape[0] * frame.shape[1] * 0.2
@@ -26,13 +31,15 @@ def detect_tennis_balls(frame, lower_hsv, upper_hsv, min_area, min_circularity):
         area = cv2.contourArea(contour)
         if not min_area <= area <= max_area:
             continue
+        x, y, width, height = cv2.boundingRect(contour)
+        aspect = min(width, height) / max(width, height)
+        if aspect < 0.65:
+            continue
         perimeter = cv2.arcLength(contour, True)
         if perimeter <= 0:
             continue
         circularity = min(1.0, 4 * math.pi * area / perimeter**2)
-        x, y, width, height = cv2.boundingRect(contour)
-        aspect = min(width, height) / max(width, height)
-        if circularity >= min_circularity and aspect >= 0.65:
+        if circularity >= min_circularity:
             detections.append((x, y, x + width, y + height, circularity * aspect))
     return np.asarray(detections, dtype=np.float32).reshape(-1, 5)
 
@@ -106,24 +113,39 @@ def run(args):
 
         frame_count = 0
         tracked_frames = 0
+        size = None
         while args.max_frames == 0 or frame_count < args.max_frames:
+            read_start_ns = perf_counter_ns()
             ok, frame = capture.read()
+            read_end_ns = perf_counter_ns()
             if not ok:
                 if is_camera or frame_count == 0:
                     raise RuntimeError(f"Could not read a frame from {source} after {frame_count} frames")
                 break
-            frame_count += 1
-            size = frame.shape[:2]
-            detections = detect_tennis_balls(frame, lower_hsv, upper_hsv, args.min_area, args.min_circularity)
+            frame_size = frame.shape[:2]
+            if size is None:
+                size = frame_size
+                hsv_buffer = np.empty_like(frame)
+                mask_buffer = np.empty(size, dtype=np.uint8)
+            elif frame_size != size:
+                raise RuntimeError(
+                    f"Frame {frame_count + 1} changed resolution from "
+                    f"{size[1]}x{size[0]} to {frame_size[1]}x{frame_size[0]}"
+                )
+
+            detect_start_ns = perf_counter_ns()
+            detections = detect_tennis_balls(
+                frame, lower_hsv, upper_hsv, args.min_area, args.min_circularity,
+                hsv_buffer=hsv_buffer, mask_buffer=mask_buffer,
+            )
+            detect_end_ns = perf_counter_ns()
+            # ByteTrack can mutate its input array. Keep the original candidates in the record.
+            candidate_boxes = detections.tolist() if records is not None else None
+            track_start_ns = perf_counter_ns()
             # Advance ByteTrack once even on empty frames. Both sizes use original pixels.
-            tracks = [snapshot_track(track) for track in tracker.update(detections, size, size)]
-            tracked_frames += bool(tracks)
-            if records is not None:
-                records.write(json.dumps({
-                    "frame": frame_count,
-                    "candidates": len(detections),
-                    "tracks": tracks,
-                }) + "\n")
+            active_tracks = tracker.update(detections, size, size)
+            track_end_ns = perf_counter_ns()
+            tracks = [snapshot_track(track) for track in active_tracks]
             if args.output and writer is None:
                 height, width = size
                 writer = cv2.VideoWriter(str(args.output), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
@@ -134,6 +156,21 @@ def run(args):
                 draw_tracks(frame, tracks)
             if writer is not None:
                 writer.write(frame)
+            frame_count += 1
+            tracked_frames += bool(tracks)
+            if records is not None:
+                records.write(json.dumps({
+                    "frame": frame_count,
+                    "frame_size_px": [size[1], size[0]],
+                    "candidates": len(candidate_boxes),
+                    "candidate_boxes": candidate_boxes,
+                    "tracks": tracks,
+                    "timing_ms": {
+                        "read": (read_end_ns - read_start_ns) / 1_000_000,
+                        "detect": (detect_end_ns - detect_start_ns) / 1_000_000,
+                        "track": (track_end_ns - track_start_ns) / 1_000_000,
+                    },
+                }) + "\n")
             if args.preview:
                 cv2.imshow("Tennis ball tracking", frame)
                 if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
